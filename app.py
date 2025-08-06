@@ -1,19 +1,12 @@
 import os
+import sqlite3
 from datetime import datetime
 from shiny import App, render, ui, reactive
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import logging
 
-# Database configuration
-DATABASE_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'database': os.getenv('DB_NAME', 'taskapp'),
-    'user': os.getenv('DB_USER', 'postgres'),
-    'password': os.getenv('DB_PASSWORD', 'password'),
-    'port': os.getenv('DB_PORT', '5432')
-}
+# SQLite database file path
+DATABASE_PATH = os.getenv('DATABASE_PATH', 'taskapp.db')
 
 # Category and Status options
 CATEGORIES = {
@@ -30,12 +23,13 @@ STATUSES = ["Idea", "Open", "Closed"]
 
 class DatabaseManager:
     def __init__(self):
-        self.config = DATABASE_CONFIG
+        self.db_path = DATABASE_PATH
         self.init_database()
     
     def get_connection(self):
         try:
-            conn = psycopg2.connect(**self.config)
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row  # This makes rows behave like dictionaries
             return conn
         except Exception as e:
             logging.error(f"Database connection error: {e}")
@@ -48,30 +42,32 @@ class DatabaseManager:
             return
         
         try:
-            with conn.cursor() as cur:
-                # Create tasks table
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS tasks (
-                        id SERIAL PRIMARY KEY,
-                        subject VARCHAR(255) NOT NULL,
-                        category INTEGER NOT NULL,
-                        status VARCHAR(20) NOT NULL DEFAULT 'Idea',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # Create notes table
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS task_notes (
-                        id SERIAL PRIMARY KEY,
-                        task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
-                        note TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                conn.commit()
+            cursor = conn.cursor()
+            
+            # Create tasks table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject TEXT NOT NULL,
+                    category INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Idea',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Create notes table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER,
+                    note TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                )
+            """)
+            
+            conn.commit()
         except Exception as e:
             logging.error(f"Database initialization error: {e}")
         finally:
@@ -84,24 +80,25 @@ class DatabaseManager:
             return False
         
         try:
-            with conn.cursor() as cur:
-                # Insert task
-                cur.execute("""
-                    INSERT INTO tasks (subject, category, status) 
-                    VALUES (%s, %s, %s) RETURNING id
-                """, (subject, category, status))
-                
-                task_id = cur.fetchone()[0]
-                
-                # Add initial note if provided
-                if note and note.strip():
-                    cur.execute("""
-                        INSERT INTO task_notes (task_id, note) 
-                        VALUES (%s, %s)
-                    """, (task_id, note.strip()))
-                
-                conn.commit()
-                return True
+            cursor = conn.cursor()
+            
+            # Insert task
+            cursor.execute("""
+                INSERT INTO tasks (subject, category, status) 
+                VALUES (?, ?, ?)
+            """, (subject, category, status))
+            
+            task_id = cursor.lastrowid
+            
+            # Add initial note if provided
+            if note and note.strip():
+                cursor.execute("""
+                    INSERT INTO task_notes (task_id, note) 
+                    VALUES (?, ?)
+                """, (task_id, note.strip()))
+            
+            conn.commit()
+            return True
         except Exception as e:
             logging.error(f"Create task error: {e}")
             return False
@@ -115,16 +112,16 @@ class DatabaseManager:
             return []
         
         try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT t.*, 
-                           STRING_AGG(tn.note, ' | ' ORDER BY tn.created_at) as notes
-                    FROM tasks t
-                    LEFT JOIN task_notes tn ON t.id = tn.task_id
-                    GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at
-                    ORDER BY t.created_at DESC
-                """)
-                return cur.fetchall()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT t.*, 
+                       GROUP_CONCAT(tn.note, ' | ') as notes
+                FROM tasks t
+                LEFT JOIN task_notes tn ON t.id = tn.task_id
+                GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at
+                ORDER BY t.created_at DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logging.error(f"Get tasks error: {e}")
             return []
@@ -138,9 +135,10 @@ class DatabaseManager:
             return None
         
         try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT * FROM tasks WHERE id = %s", (task_id,))
-                return cur.fetchone()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
         except Exception as e:
             logging.error(f"Get task error: {e}")
             return None
@@ -154,13 +152,13 @@ class DatabaseManager:
             return []
         
         try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT * FROM task_notes 
-                    WHERE task_id = %s 
-                    ORDER BY created_at DESC
-                """, (task_id,))
-                return cur.fetchall()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM task_notes 
+                WHERE task_id = ? 
+                ORDER BY created_at DESC
+            """, (task_id,))
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logging.error(f"Get task notes error: {e}")
             return []
@@ -174,14 +172,14 @@ class DatabaseManager:
             return False
         
         try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE tasks 
-                    SET subject = %s, category = %s, status = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """, (subject, category, status, task_id))
-                conn.commit()
-                return True
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE tasks 
+                SET subject = ?, category = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (subject, category, status, task_id))
+            conn.commit()
+            return True
         except Exception as e:
             logging.error(f"Update task error: {e}")
             return False
@@ -195,13 +193,13 @@ class DatabaseManager:
             return False
         
         try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO task_notes (task_id, note) 
-                    VALUES (%s, %s)
-                """, (task_id, note))
-                conn.commit()
-                return True
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO task_notes (task_id, note) 
+                VALUES (?, ?)
+            """, (task_id, note))
+            conn.commit()
+            return True
         except Exception as e:
             logging.error(f"Add note error: {e}")
             return False
@@ -215,10 +213,15 @@ class DatabaseManager:
             return False
         
         try:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
-                conn.commit()
-                return True
+            cursor = conn.cursor()
+            
+            # SQLite with foreign keys enabled will automatically delete related notes
+            # But let's be explicit
+            cursor.execute("DELETE FROM task_notes WHERE task_id = ?", (task_id,))
+            cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            
+            conn.commit()
+            return True
         except Exception as e:
             logging.error(f"Delete task error: {e}")
             return False
@@ -383,7 +386,7 @@ def server(input, output, session):
                 'Subject': task['subject'],
                 'Category': CATEGORIES[task['category']],
                 'Status': task['status'],
-                'Created': task['created_at'].strftime('%Y-%m-%d %H:%M') if task['created_at'] else '',
+                'Created': task['created_at'][:19] if task['created_at'] else '',  # Format timestamp
                 'Notes': task['notes'][:100] + '...' if task['notes'] and len(task['notes']) > 100 else task['notes'] or ''
             })
         
@@ -406,7 +409,7 @@ def server(input, output, session):
         for note in notes:
             note_elements.append(
                 ui.div(
-                    ui.strong(f"Added: {note['created_at'].strftime('%Y-%m-%d %H:%M')}"),
+                    ui.strong(f"Added: {note['created_at'][:19]}"),  # Format timestamp
                     ui.br(),
                     note['note'],
                     style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px;"
