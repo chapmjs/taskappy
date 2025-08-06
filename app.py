@@ -411,4 +411,38 @@ def server(input, output, session):
                 'Category': CATEGORIES[task['category']],
                 'Status': task['status'],
                 'Created': task['created_at'].strftime('%Y-%m-%d %H:%M') if task['created_at'] else '',
-                'Notes': task['notes'][:100] + '...' if task['notes'] and len(task['notes']) > 100
+                'Notes': task['notes'][:100] + '...' if task['notes'] and len(task['notes']) > 100 else task['notes'] or ''
+            })
+        
+        return pd.DataFrame(df_data)
+    
+    # Display notes for selected task
+    @output
+    @render.ui
+    def task_notes_display():
+        if not input.edit_task_id():
+            return ui.div()
+        
+        task_id = int(input.edit_task_id())
+        notes = db.get_task_notes(task_id)
+        
+        if not notes:
+            return ui.div()
+        
+        note_elements = [ui.h4("Task Notes:")]
+        for note in notes:
+            note_elements.append(
+                ui.div(
+                    ui.strong(f"Added: {note['created_at'].strftime('%Y-%m-%d %H:%M')}"),
+                    ui.br(),
+                    note['note'],
+                    style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px;"
+                )
+            )
+        
+        return ui.div(*note_elements)
+
+app = App(app_ui, server)
+
+if __name__ == "__main__":
+    app.run()
