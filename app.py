@@ -620,8 +620,14 @@ def server(input, output, session):
         
         return ui.card(
             ui.card_header(f"Search Results ({len(results)} task{'s' if len(results) != 1 else ''} found)"),
-            ui.p("Click on any row to select and edit that task:", style="font-style: italic; color: #666; margin-bottom: 15px;"),
-            ui.output_data_frame("search_results_table")
+            ui.p("Click on a row to select it, then click the button below to edit:", 
+                 style="font-style: italic; color: #666; margin-bottom: 15px;"),
+            ui.output_data_frame("search_results_table"),
+            ui.div(
+                ui.input_action_button("edit_selected_search_task", "Edit Selected Task", 
+                                     class_="btn-success", style="margin-top: 15px;"),
+                style="text-align: center;"
+            )
         )
     
     @output
@@ -650,45 +656,40 @@ def server(input, output, session):
     
     # Handle task selection from search results table
     @reactive.Effect
-    def handle_search_table_click():
-        # Monitor for any changes in the search results table selection
+    @reactive.event(input.edit_selected_search_task)
+    def handle_search_selection():
         if not show_search_results.get():
             return
             
         try:
             # Get current selection state
             selection = input.search_results_table_cell_selection()
-            if not selection:
+            if not selection or 'rows' not in selection or len(selection['rows']) == 0:
+                # No row selected, show a message or do nothing
                 return
                 
-            # Check if any rows are selected
-            if 'rows' in selection and len(selection['rows']) > 0:
-                selected_row_index = selection['rows'][0]
-                results = search_results.get()
+            selected_row_index = selection['rows'][0]
+            results = search_results.get()
+            
+            if selected_row_index < len(results):
+                selected_task = results[selected_row_index]
+                task_id = selected_task['id']
                 
-                if selected_row_index < len(results):
-                    selected_task = results[selected_row_index]
-                    task_id = selected_task['id']
-                    
-                    # Update the edit form with the selected task
-                    ui.update_select("edit_task_id", selected=str(task_id))
-                    
-                    # Load the task data into the edit form
-                    task_data = db.get_task_by_id(task_id)
-                    if task_data:
-                        ui.update_text("edit_subject", value=task_data['subject'])
-                        ui.update_select("edit_category", selected=str(task_data['category']))
-                        ui.update_select("edit_status", selected=task_data['status'])
-                    
-                    # Clear search results after a short delay to allow the selection to register
-                    def clear_search_delayed():
-                        show_search_results.set(False)
-                        ui.update_text("search_term", value="")
-                        search_results.set([])
-                    
-                    # Use a reactive timer to delay the clearing
-                    session.send_custom_message("clear_search", {"delay": 500})
-                    clear_search_delayed()
+                # Update the edit form with the selected task
+                ui.update_select("edit_task_id", selected=str(task_id))
+                
+                # Load the task data into the edit form
+                task_data = db.get_task_by_id(task_id)
+                if task_data:
+                    ui.update_text("edit_subject", value=task_data['subject'])
+                    ui.update_select("edit_category", selected=str(task_data['category']))
+                    ui.update_select("edit_status", selected=task_data['status'])
+                
+                # Clear search results
+                show_search_results.set(False)
+                ui.update_text("search_term", value="")
+                ui.update_select("search_status", selected="All")
+                search_results.set([])
                     
         except Exception as e:
             # If there's any error with selection, just continue
