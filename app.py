@@ -271,6 +271,33 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
+    def search_tasks(self, search_term):
+        """Search tasks by subject or category name"""
+        conn = self.get_connection()
+        if not conn:
+            return []
+        
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT t.*, c.name as category_name,
+                       GROUP_CONCAT(tn.note ORDER BY tn.created_at SEPARATOR ' | ') as notes
+                FROM tasks t
+                JOIN categories c ON t.category = c.id
+                LEFT JOIN task_notes tn ON t.id = tn.task_id
+                WHERE t.subject LIKE %s OR c.name LIKE %s
+                GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
+                ORDER BY t.created_at DESC
+            """, (f"%{search_term}%", f"%{search_term}%"))
+            return cursor.fetchall()
+        except Error as e:
+            logging.error(f"Search tasks error: {e}")
+            return []
+        finally:
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
+    
     def get_task_by_id(self, task_id):
         """Get a specific task by ID"""
         conn = self.get_connection()
@@ -422,6 +449,29 @@ app_ui = ui.page_fluid(
             
             ui.hr(),
             
+            # Search Section
+            ui.card(
+                ui.card_header("Search Tasks"),
+                ui.row(
+                    ui.column(8,
+                        ui.input_text("search_term", "Search by Subject or Category:", 
+                                    placeholder="Enter search term...")
+                    ),
+                    ui.column(4,
+                        ui.input_action_button("search_tasks", "Search", class_="btn-secondary"),
+                        ui.input_action_button("clear_search", "Clear", class_="btn-outline-secondary", 
+                                             style="margin-left: 10px;")
+                    )
+                )
+            ),
+            
+            ui.hr(),
+            
+            # Search Results Section
+            ui.output_ui("search_results_section"),
+            
+            ui.hr(),
+            
             ui.card(
                 ui.card_header("All Tasks"),
                 ui.output_data_frame("tasks_table")
@@ -473,6 +523,8 @@ def server(input, output, session):
     refresh_categories = reactive.Value(0)
     category_message = reactive.Value("")
     edit_category_message = reactive.Value("")
+    search_results = reactive.Value([])
+    show_search_results = reactive.Value(False)
     
     # Dynamic UI for category selects
     @output
@@ -504,6 +556,95 @@ def server(input, output, session):
         refresh_categories.get()  # Depend on category changes
         categories = db.get_categories_dict()
         return ui.input_select("selected_category", "Select Category to Edit:", choices=categories)
+    
+    # Search functionality
+    @reactive.Effect
+    @reactive.event(input.search_tasks)
+    def perform_search():
+        if not input.search_term() or not input.search_term().strip():
+            show_search_results.set(False)
+            return
+        
+        results = db.search_tasks(input.search_term().strip())
+        search_results.set(results)
+        show_search_results.set(True)
+    
+    @reactive.Effect
+    @reactive.event(input.clear_search)
+    def clear_search():
+        ui.update_text("search_term", value="")
+        search_results.set([])
+        show_search_results.set(False)
+    
+    @output
+    @render.ui
+    def search_results_section():
+        if not show_search_results.get():
+            return ui.div()
+        
+        results = search_results.get()
+        
+        if not results:
+            return ui.card(
+                ui.card_header("Search Results"),
+                ui.p("No tasks found matching your search criteria.")
+            )
+        
+        # Create clickable task items
+        task_items = []
+        for task in results:
+            # Truncate notes for display
+            notes_preview = task['notes'][:50] + '...' if task['notes'] and len(task['notes']) > 50 else task['notes'] or 'No notes'
+            
+            task_items.append(
+                ui.div(
+                    ui.input_action_button(
+                        f"select_task_{task['id']}", 
+                        f"{task['subject']} | {task['category_name']} | {task['status']}",
+                        class_="btn-outline-primary btn-block",
+                        style="text-align: left; margin-bottom: 5px; width: 100%;"
+                    ),
+                    ui.small(f"Notes: {notes_preview}", style="color: #666; display: block; margin-left: 10px;"),
+                    style="margin-bottom: 10px;"
+                )
+            )
+        
+        return ui.card(
+            ui.card_header(f"Search Results ({len(results)} task{'s' if len(results) != 1 else ''} found)"),
+            ui.div(*task_items)
+        )
+    
+    # Handle task selection from search results
+    @reactive.Effect
+    def handle_task_selection():
+        # This will handle clicks on any search result task button
+        for task in search_results.get():
+            button_id = f"select_task_{task['id']}"
+            
+            # Create a closure to capture the task_id
+            def make_handler(task_id):
+                @reactive.Effect
+                @reactive.event(getattr(input, button_id, lambda: 0))
+                def select_task():
+                    # Update the edit form with the selected task
+                    ui.update_select("edit_task_id", selected=str(task_id))
+                    
+                    # Load the task data into the edit form
+                    task_data = db.get_task_by_id(task_id)
+                    if task_data:
+                        ui.update_text("edit_subject", value=task_data['subject'])
+                        ui.update_select("edit_category", selected=str(task_data['category']))
+                        ui.update_select("edit_status", selected=task_data['status'])
+                    
+                    # Clear search results
+                    show_search_results.set(False)
+                    ui.update_text("search_term", value="")
+                
+                return select_task
+            
+            # Only create handler if the button input exists
+            if hasattr(input, button_id):
+                make_handler(task['id'])()
     
     # Category management
     @reactive.Effect
