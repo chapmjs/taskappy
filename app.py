@@ -618,30 +618,81 @@ def server(input, output, session):
                 ui.p("No tasks found matching your search criteria.")
             )
         
-        # Create radio button choices for task selection
-        choices = {}
-        for task in results:
-            notes_preview = task['notes'][:50] + '...' if task['notes'] and len(task['notes']) > 50 else task['notes'] or 'No notes'
-            choice_text = f"ID: {task['id']} | {task['subject']} | {task['category_name']} | {task['status']}"
-            if notes_preview != 'No notes':
-                choice_text += f" | Notes: {notes_preview}"
-            choices[str(task['id'])] = choice_text
-        
         return ui.card(
             ui.card_header(f"Search Results ({len(results)} task{'s' if len(results) != 1 else ''} found)"),
-            ui.p("Select a task to edit:", style="font-style: italic; color: #666; margin-bottom: 15px;"),
-            ui.input_radio_buttons(
-                "selected_search_task",
-                "",
-                choices=choices,
-                selected=None
-            ),
-            ui.div(
-                ui.input_action_button("load_selected_task", "Load Selected Task for Editing", 
-                                     class_="btn-success", style="margin-top: 15px;"),
-                style="text-align: center;"
-            )
+            ui.p("Click on any row to select and edit that task:", style="font-style: italic; color: #666; margin-bottom: 15px;"),
+            ui.output_data_frame("search_results_table")
         )
+    
+    @output
+    @render.data_frame
+    def search_results_table():
+        if not show_search_results.get():
+            return pd.DataFrame()
+        
+        results = search_results.get()
+        if not results:
+            return pd.DataFrame()
+        
+        task_data = []
+        for task in results:
+            notes_preview = task['notes'][:50] + '...' if task['notes'] and len(task['notes']) > 50 else task['notes'] or 'No notes'
+            task_data.append({
+                'ID': task['id'],
+                'Subject': task['subject'],
+                'Category': task['category_name'],
+                'Status': task['status'],
+                'Notes': notes_preview,
+                'Created': task['created_at'].strftime('%Y-%m-%d %H:%M') if task['created_at'] else ''
+            })
+        
+        return pd.DataFrame(task_data)
+    
+    # Handle task selection from search results table
+    @reactive.Effect
+    def handle_search_table_click():
+        # Monitor for any changes in the search results table selection
+        if not show_search_results.get():
+            return
+            
+        try:
+            # Get current selection state
+            selection = input.search_results_table_cell_selection()
+            if not selection:
+                return
+                
+            # Check if any rows are selected
+            if 'rows' in selection and len(selection['rows']) > 0:
+                selected_row_index = selection['rows'][0]
+                results = search_results.get()
+                
+                if selected_row_index < len(results):
+                    selected_task = results[selected_row_index]
+                    task_id = selected_task['id']
+                    
+                    # Update the edit form with the selected task
+                    ui.update_select("edit_task_id", selected=str(task_id))
+                    
+                    # Load the task data into the edit form
+                    task_data = db.get_task_by_id(task_id)
+                    if task_data:
+                        ui.update_text("edit_subject", value=task_data['subject'])
+                        ui.update_select("edit_category", selected=str(task_data['category']))
+                        ui.update_select("edit_status", selected=task_data['status'])
+                    
+                    # Clear search results after a short delay to allow the selection to register
+                    def clear_search_delayed():
+                        show_search_results.set(False)
+                        ui.update_text("search_term", value="")
+                        search_results.set([])
+                    
+                    # Use a reactive timer to delay the clearing
+                    session.send_custom_message("clear_search", {"delay": 500})
+                    clear_search_delayed()
+                    
+        except Exception as e:
+            # If there's any error with selection, just continue
+            pass
     
     # Handle task selection from search results
     @reactive.Effect
