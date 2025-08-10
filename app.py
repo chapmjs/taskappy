@@ -288,7 +288,7 @@ class DatabaseManager:
                 WHERE t.subject LIKE %s OR c.name LIKE %s
                 GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
                 ORDER BY t.created_at DESC
-            """, (f"'%{search_term}%'", f"'%{search_term}%'"))
+            """, (f"%{search_term}%", f"%{search_term}%"))
             return cursor.fetchall()
         except Error as e:
             logging.error(f"Search tasks error: {e}")
@@ -590,61 +590,85 @@ def server(input, output, session):
                 ui.p("No tasks found matching your search criteria.")
             )
         
-        # Create clickable task items
-        task_items = []
+        # Create clickable task items using a data frame instead of buttons
+        task_data = []
         for task in results:
-            # Truncate notes for display
             notes_preview = task['notes'][:50] + '...' if task['notes'] and len(task['notes']) > 50 else task['notes'] or 'No notes'
-            
-            task_items.append(
-                ui.div(
-                    ui.input_action_button(
-                        f"select_task_{task['id']}", 
-                        f"{task['subject']} | {task['category_name']} | {task['status']}",
-                        class_="btn-outline-primary btn-block",
-                        style="text-align: left; margin-bottom: 5px; width: 100%;"
-                    ),
-                    ui.small(f"Notes: {notes_preview}", style="color: #666; display: block; margin-left: 10px;"),
-                    style="margin-bottom: 10px;"
-                )
-            )
+            task_data.append({
+                'ID': task['id'],
+                'Subject': task['subject'],
+                'Category': task['category_name'],
+                'Status': task['status'],
+                'Notes': notes_preview,
+                'Created': task['created_at'].strftime('%Y-%m-%d %H:%M') if task['created_at'] else ''
+            })
+        
+        df = pd.DataFrame(task_data)
         
         return ui.card(
             ui.card_header(f"Search Results ({len(results)} task{'s' if len(results) != 1 else ''} found)"),
-            ui.div(*task_items)
+            ui.p("Click on a row to select and edit that task:", style="font-style: italic; color: #666;"),
+            ui.output_data_frame("search_results_table")
         )
     
-    # Handle task selection from search results
+    @output
+    @render.data_frame
+    def search_results_table():
+        if not show_search_results.get():
+            return pd.DataFrame()
+        
+        results = search_results.get()
+        if not results:
+            return pd.DataFrame()
+        
+        task_data = []
+        for task in results:
+            notes_preview = task['notes'][:50] + '...' if task['notes'] and len(task['notes']) > 50 else task['notes'] or 'No notes'
+            task_data.append({
+                'ID': task['id'],
+                'Subject': task['subject'],
+                'Category': task['category_name'],
+                'Status': task['status'],
+                'Notes': notes_preview,
+                'Created': task['created_at'].strftime('%Y-%m-%d %H:%M') if task['created_at'] else ''
+            })
+        
+        return pd.DataFrame(task_data)
+    
+    # Handle task selection from search results table
     @reactive.Effect
-    def handle_task_selection():
-        # This will handle clicks on any search result task button
-        for task in search_results.get():
-            button_id = f"select_task_{task['id']}"
+    @reactive.event(input.search_results_table_cell_selection)
+    def handle_search_selection():
+        if not input.search_results_table_cell_selection() or not show_search_results.get():
+            return
+        
+        selection = input.search_results_table_cell_selection()
+        if not selection or 'rows' not in selection or len(selection['rows']) == 0:
+            return
+        
+        # Get the selected row index
+        selected_row = selection['rows'][0]
+        results = search_results.get()
+        
+        if selected_row < len(results):
+            selected_task = results[selected_row]
+            task_id = selected_task['id']
             
-            # Create a closure to capture the task_id
-            def make_handler(task_id):
-                @reactive.Effect
-                @reactive.event(getattr(input, button_id, lambda: 0))
-                def select_task():
-                    # Update the edit form with the selected task
-                    ui.update_select("edit_task_id", selected=str(task_id))
-                    
-                    # Load the task data into the edit form
-                    task_data = db.get_task_by_id(task_id)
-                    if task_data:
-                        ui.update_text("edit_subject", value=task_data['subject'])
-                        ui.update_select("edit_category", selected=str(task_data['category']))
-                        ui.update_select("edit_status", selected=task_data['status'])
-                    
-                    # Clear search results
-                    show_search_results.set(False)
-                    ui.update_text("search_term", value="")
-                
-                return select_task
+            # Update the edit form with the selected task
+            ui.update_select("edit_task_id", selected=str(task_id))
             
-            # Only create handler if the button input exists
-            if hasattr(input, button_id):
-                make_handler(task['id'])()
+            # Load the task data into the edit form
+            task_data = db.get_task_by_id(task_id)
+            if task_data:
+                ui.update_text("edit_subject", value=task_data['subject'])
+                ui.update_select("edit_category", selected=str(task_data['category']))
+                ui.update_select("edit_status", selected=task_data['status'])
+            
+            # Clear search results
+            show_search_results.set(False)
+            ui.update_text("search_term", value="")
+            search_results.set([])
+    
     
     # Category management
     @reactive.Effect
