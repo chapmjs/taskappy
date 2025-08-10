@@ -68,11 +68,11 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     subject VARCHAR(255) NOT NULL,
-                    category_id INT NOT NULL,
+                    category INT NOT NULL,
                     status VARCHAR(20) NOT NULL DEFAULT 'Idea',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+                    FOREIGN KEY (category) REFERENCES categories(id) ON DELETE RESTRICT
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
@@ -141,7 +141,7 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def get_category_by_id(self, category_id):
+    def get_category_by_id(self, category):
         """Get a specific category by ID"""
         conn = self.get_connection()
         if not conn:
@@ -149,7 +149,7 @@ class DatabaseManager:
         
         try:
             cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT * FROM categories WHERE id = %s", (category_id,))
+            cursor.execute("SELECT * FROM categories WHERE id = %s", (category,))
             return cursor.fetchone()
         except Error as e:
             logging.error(f"Get category error: {e}")
@@ -159,7 +159,7 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def update_category(self, category_id, name):
+    def update_category(self, category, name):
         """Update a category"""
         conn = self.get_connection()
         if not conn:
@@ -167,7 +167,7 @@ class DatabaseManager:
         
         try:
             cursor = conn.cursor()
-            cursor.execute("UPDATE categories SET name = %s WHERE id = %s", (name, category_id))
+            cursor.execute("UPDATE categories SET name = %s WHERE id = %s", (name, category))
             conn.commit()
             return True
         except Error as e:
@@ -178,7 +178,7 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def delete_category(self, category_id):
+    def delete_category(self, category):
         """Delete a category (only if no tasks are using it)"""
         conn = self.get_connection()
         if not conn:
@@ -188,13 +188,13 @@ class DatabaseManager:
             cursor = conn.cursor()
             
             # Check if any tasks are using this category
-            cursor.execute("SELECT COUNT(*) FROM tasks WHERE category_id = %s", (category_id,))
+            cursor.execute("SELECT COUNT(*) FROM tasks WHERE category = %s", (category,))
             task_count = cursor.fetchone()[0]
             
             if task_count > 0:
                 return False, f"Cannot delete category. {task_count} task(s) are using this category."
             
-            cursor.execute("DELETE FROM categories WHERE id = %s", (category_id,))
+            cursor.execute("DELETE FROM categories WHERE id = %s", (category,))
             conn.commit()
             return True, "Category deleted successfully"
         except Error as e:
@@ -211,7 +211,7 @@ class DatabaseManager:
         return {str(cat['id']): cat['name'] for cat in categories}
     
     # Task CRUD operations (updated to work with categories table)
-    def create_task(self, subject, category_id, status, note=None):
+    def create_task(self, subject, category, status, note=None):
         """Create a new task with optional initial note"""
         conn = self.get_connection()
         if not conn:
@@ -222,9 +222,9 @@ class DatabaseManager:
             
             # Insert task
             cursor.execute("""
-                INSERT INTO tasks (subject, category_id, status) 
+                INSERT INTO tasks (subject, category, status) 
                 VALUES (%s, %s, %s)
-            """, (subject, category_id, status))
+            """, (subject, category, status))
             
             task_id = cursor.lastrowid
             
@@ -257,9 +257,9 @@ class DatabaseManager:
                 SELECT t.*, c.name as category_name,
                        GROUP_CONCAT(tn.note ORDER BY tn.created_at SEPARATOR ' | ') as notes
                 FROM tasks t
-                JOIN categories c ON t.category_id = c.id
+                JOIN categories c ON t.category = c.id
                 LEFT JOIN task_notes tn ON t.id = tn.task_id
-                GROUP BY t.id, t.subject, t.category_id, t.status, t.created_at, t.updated_at, c.name
+                GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
                 ORDER BY t.created_at DESC
             """)
             return cursor.fetchall()
@@ -311,7 +311,7 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def update_task(self, task_id, subject, category_id, status):
+    def update_task(self, task_id, subject, category, status):
         """Update a task"""
         conn = self.get_connection()
         if not conn:
@@ -321,9 +321,9 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE tasks 
-                SET subject = %s, category_id = %s, status = %s
+                SET subject = %s, category = %s, status = %s
                 WHERE id = %s
-            """, (subject, category_id, status, task_id))
+            """, (subject, category, status, task_id))
             conn.commit()
             return True
         except Error as e:
@@ -503,7 +503,7 @@ def server(input, output, session):
     def edit_category_dropdown():
         refresh_categories.get()  # Depend on category changes
         categories = db.get_categories_dict()
-        return ui.input_select("selected_category_id", "Select Category to Edit:", choices=categories)
+        return ui.input_select("selected_category", "Select Category to Edit:", choices=categories)
     
     # Category management
     @reactive.Effect
@@ -522,22 +522,22 @@ def server(input, output, session):
             category_message.set("Error adding category. It may already exist.")
     
     @reactive.Effect
-    @reactive.event(input.selected_category_id)
+    @reactive.event(input.selected_category)
     def update_category_form():
-        if not input.selected_category_id():
+        if not input.selected_category():
             return
         
-        category = db.get_category_by_id(int(input.selected_category_id()))
+        category = db.get_category_by_id(int(input.selected_category()))
         if category:
             ui.update_text("edit_category_name", value=category['name'])
     
     @reactive.Effect
     @reactive.event(input.update_category)
     def update_existing_category():
-        if not input.selected_category_id() or not input.edit_category_name():
+        if not input.selected_category() or not input.edit_category_name():
             return
         
-        success = db.update_category(int(input.selected_category_id()), input.edit_category_name())
+        success = db.update_category(int(input.selected_category()), input.edit_category_name())
         
         if success:
             edit_category_message.set("Category updated successfully!")
@@ -549,14 +549,14 @@ def server(input, output, session):
     @reactive.Effect
     @reactive.event(input.delete_category)
     def delete_existing_category():
-        if not input.selected_category_id():
+        if not input.selected_category():
             return
         
-        success, message = db.delete_category(int(input.selected_category_id()))
+        success, message = db.delete_category(int(input.selected_category()))
         edit_category_message.set(message)
         
         if success:
-            ui.update_select("selected_category_id", selected="")
+            ui.update_select("selected_category", selected="")
             ui.update_text("edit_category_name", value="")
             refresh_categories.set(refresh_categories.get() + 1)
     
@@ -588,7 +588,7 @@ def server(input, output, session):
         task = db.get_task_by_id(int(input.edit_task_id()))
         if task:
             ui.update_text("edit_subject", value=task['subject'])
-            ui.update_select("edit_category", selected=str(task['category_id']))
+            ui.update_select("edit_category", selected=str(task['category']))
             ui.update_select("edit_status", selected=task['status'])
     
     @reactive.Effect
