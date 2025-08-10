@@ -285,7 +285,7 @@ class DatabaseManager:
                 FROM tasks t
                 JOIN categories c ON t.category = c.id
                 LEFT JOIN task_notes tn ON t.id = tn.task_id
-                WHERE t.subject LIKE %s OR c.name LIKE %s
+                WHERE t.subject LIKE '%s' OR c.name LIKE '%s'
                 GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
                 ORDER BY t.created_at DESC
             """, (f"%{search_term}%", f"%{search_term}%"))
