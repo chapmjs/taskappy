@@ -271,24 +271,39 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def search_tasks(self, search_term):
-        """Search tasks by subject or category name"""
+    def search_tasks(self, search_term, status_filter=None):
+        """Search tasks by subject or category name, optionally filtered by status"""
         conn = self.get_connection()
         if not conn:
             return []
         
         try:
             cursor = conn.cursor(dictionary=True)
-            cursor.execute("""
-                SELECT t.*, c.name as category_name,
-                       GROUP_CONCAT(tn.note ORDER BY tn.created_at SEPARATOR ' | ') as notes
-                FROM tasks t
-                JOIN categories c ON t.category = c.id
-                LEFT JOIN task_notes tn ON t.id = tn.task_id
-                WHERE t.subject LIKE %s OR c.name LIKE %s
-                GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
-                ORDER BY t.created_at DESC
-            """, (f"%{search_term}%", f"%{search_term}%"))
+            
+            # Build the query based on whether status filter is provided
+            if status_filter and status_filter != "All":
+                cursor.execute("""
+                    SELECT t.*, c.name as category_name,
+                           GROUP_CONCAT(tn.note ORDER BY tn.created_at SEPARATOR ' | ') as notes
+                    FROM tasks t
+                    JOIN categories c ON t.category = c.id
+                    LEFT JOIN task_notes tn ON t.id = tn.task_id
+                    WHERE (t.subject LIKE %s OR c.name LIKE %s) AND t.status = %s
+                    GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
+                    ORDER BY t.created_at DESC
+                """, (f"%{search_term}%", f"%{search_term}%", status_filter))
+            else:
+                cursor.execute("""
+                    SELECT t.*, c.name as category_name,
+                           GROUP_CONCAT(tn.note ORDER BY tn.created_at SEPARATOR ' | ') as notes
+                    FROM tasks t
+                    JOIN categories c ON t.category = c.id
+                    LEFT JOIN task_notes tn ON t.id = tn.task_id
+                    WHERE t.subject LIKE %s OR c.name LIKE %s
+                    GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at, c.name
+                    ORDER BY t.created_at DESC
+                """, (f"%{search_term}%", f"%{search_term}%"))
+            
             return cursor.fetchall()
         except Error as e:
             logging.error(f"Search tasks error: {e}")
@@ -453,11 +468,15 @@ app_ui = ui.page_fluid(
             ui.card(
                 ui.card_header("Search Tasks"),
                 ui.row(
-                    ui.column(8,
+                    ui.column(6,
                         ui.input_text("search_term", "Search by Subject or Category:", 
                                     placeholder="Enter search term...")
                     ),
-                    ui.column(4,
+                    ui.column(3,
+                        ui.input_select("search_status", "Filter by Status:", 
+                                      choices=["All"] + STATUSES, selected="All")
+                    ),
+                    ui.column(3,
                         ui.input_action_button("search_tasks", "Search", class_="btn-secondary"),
                         ui.input_action_button("clear_search", "Clear", class_="btn-outline-secondary", 
                                              style="margin-left: 10px;")
@@ -561,11 +580,19 @@ def server(input, output, session):
     @reactive.Effect
     @reactive.event(input.search_tasks)
     def perform_search():
-        if not input.search_term() or not input.search_term().strip():
+        search_term = input.search_term()
+        status_filter = input.search_status()
+        
+        # If no search term and status is "All", don't show results
+        if (not search_term or not search_term.strip()) and status_filter == "All":
             show_search_results.set(False)
             return
         
-        results = db.search_tasks(input.search_term().strip())
+        # If no search term but status filter is selected, search with empty string
+        if not search_term or not search_term.strip():
+            search_term = ""
+        
+        results = db.search_tasks(search_term.strip(), status_filter)
         search_results.set(results)
         show_search_results.set(True)
     
@@ -573,6 +600,7 @@ def server(input, output, session):
     @reactive.event(input.clear_search)
     def clear_search():
         ui.update_text("search_term", value="")
+        ui.update_select("search_status", selected="All")
         search_results.set([])
         show_search_results.set(False)
     
