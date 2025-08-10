@@ -18,16 +18,16 @@ DATABASE_CONFIG = {
     'collation': 'utf8mb4_unicode_ci'
 }
 
-# Category and Status options
-CATEGORIES = {
-    1: "Relationship with God",
-    2: "Spouse", 
-    3: "Family",
-    4: "Church",
-    5: "Work-Education",
-    6: "Community-Friends",
-    7: "Hobbies-Interest"
-}
+# Default categories (will be loaded from database)
+DEFAULT_CATEGORIES = [
+    "Relationship with God",
+    "Spouse", 
+    "Family",
+    "Church",
+    "Work-Education",
+    "Community-Friends",
+    "Hobbies-Interest"
+]
 
 STATUSES = ["Idea", "Open", "Closed"]
 
@@ -53,15 +53,26 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             
-            # Create tasks table
+            # Create categories table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL UNIQUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """)
+            
+            # Create tasks table (updated to reference categories table)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     subject VARCHAR(255) NOT NULL,
-                    category INT NOT NULL,
+                    category_id INT NOT NULL,
                     status VARCHAR(20) NOT NULL DEFAULT 'Idea',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
@@ -76,6 +87,14 @@ class DatabaseManager:
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
             
+            # Insert default categories if categories table is empty
+            cursor.execute("SELECT COUNT(*) FROM categories")
+            count = cursor.fetchone()[0]
+            
+            if count == 0:
+                for category in DEFAULT_CATEGORIES:
+                    cursor.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
+            
             conn.commit()
         except Error as e:
             logging.error(f"Database initialization error: {e}")
@@ -84,7 +103,115 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def create_task(self, subject, category, status, note=None):
+    # Category CRUD operations
+    def create_category(self, name):
+        """Create a new category"""
+        conn = self.get_connection()
+        if not conn:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO categories (name) VALUES (%s)", (name,))
+            conn.commit()
+            return True
+        except Error as e:
+            logging.error(f"Create category error: {e}")
+            return False
+        finally:
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
+    
+    def get_all_categories(self):
+        """Get all categories"""
+        conn = self.get_connection()
+        if not conn:
+            return []
+        
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM categories ORDER BY name")
+            return cursor.fetchall()
+        except Error as e:
+            logging.error(f"Get categories error: {e}")
+            return []
+        finally:
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
+    
+    def get_category_by_id(self, category_id):
+        """Get a specific category by ID"""
+        conn = self.get_connection()
+        if not conn:
+            return None
+        
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM categories WHERE id = %s", (category_id,))
+            return cursor.fetchone()
+        except Error as e:
+            logging.error(f"Get category error: {e}")
+            return None
+        finally:
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
+    
+    def update_category(self, category_id, name):
+        """Update a category"""
+        conn = self.get_connection()
+        if not conn:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE categories SET name = %s WHERE id = %s", (name, category_id))
+            conn.commit()
+            return True
+        except Error as e:
+            logging.error(f"Update category error: {e}")
+            return False
+        finally:
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
+    
+    def delete_category(self, category_id):
+        """Delete a category (only if no tasks are using it)"""
+        conn = self.get_connection()
+        if not conn:
+            return False, "Database connection error"
+        
+        try:
+            cursor = conn.cursor()
+            
+            # Check if any tasks are using this category
+            cursor.execute("SELECT COUNT(*) FROM tasks WHERE category_id = %s", (category_id,))
+            task_count = cursor.fetchone()[0]
+            
+            if task_count > 0:
+                return False, f"Cannot delete category. {task_count} task(s) are using this category."
+            
+            cursor.execute("DELETE FROM categories WHERE id = %s", (category_id,))
+            conn.commit()
+            return True, "Category deleted successfully"
+        except Error as e:
+            logging.error(f"Delete category error: {e}")
+            return False, f"Error deleting category: {e}"
+        finally:
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
+    
+    def get_categories_dict(self):
+        """Get categories as a dictionary for dropdown choices"""
+        categories = self.get_all_categories()
+        return {str(cat['id']): cat['name'] for cat in categories}
+    
+    # Task CRUD operations (updated to work with categories table)
+    def create_task(self, subject, category_id, status, note=None):
         """Create a new task with optional initial note"""
         conn = self.get_connection()
         if not conn:
@@ -95,9 +222,9 @@ class DatabaseManager:
             
             # Insert task
             cursor.execute("""
-                INSERT INTO tasks (subject, category, status) 
+                INSERT INTO tasks (subject, category_id, status) 
                 VALUES (%s, %s, %s)
-            """, (subject, category, status))
+            """, (subject, category_id, status))
             
             task_id = cursor.lastrowid
             
@@ -119,7 +246,7 @@ class DatabaseManager:
                 conn.close()
     
     def get_all_tasks(self):
-        """Get all tasks with their notes"""
+        """Get all tasks with their notes and category names"""
         conn = self.get_connection()
         if not conn:
             return []
@@ -127,11 +254,12 @@ class DatabaseManager:
         try:
             cursor = conn.cursor(dictionary=True)
             cursor.execute("""
-                SELECT t.*, 
+                SELECT t.*, c.name as category_name,
                        GROUP_CONCAT(tn.note ORDER BY tn.created_at SEPARATOR ' | ') as notes
                 FROM tasks t
+                JOIN categories c ON t.category_id = c.id
                 LEFT JOIN task_notes tn ON t.id = tn.task_id
-                GROUP BY t.id, t.subject, t.category, t.status, t.created_at, t.updated_at
+                GROUP BY t.id, t.subject, t.category_id, t.status, t.created_at, t.updated_at, c.name
                 ORDER BY t.created_at DESC
             """)
             return cursor.fetchall()
@@ -183,7 +311,7 @@ class DatabaseManager:
                 cursor.close()
                 conn.close()
     
-    def update_task(self, task_id, subject, category, status):
+    def update_task(self, task_id, subject, category_id, status):
         """Update a task"""
         conn = self.get_connection()
         if not conn:
@@ -193,9 +321,9 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE tasks 
-                SET subject = %s, category = %s, status = %s
+                SET subject = %s, category_id = %s, status = %s
                 WHERE id = %s
-            """, (subject, category, status, task_id))
+            """, (subject, category_id, status, task_id))
             conn.commit()
             return True
         except Error as e:
@@ -257,56 +385,182 @@ db = DatabaseManager()
 
 # Define UI
 app_ui = ui.page_fluid(
-    ui.h1("Simple Task Manager"),
+    ui.h1("Task Manager with Category Management"),
     
-    ui.row(
-        ui.column(6,
+    # Navigation tabs
+    ui.navset_tab(
+        ui.nav_panel("Tasks",
+            ui.row(
+                ui.column(6,
+                    ui.card(
+                        ui.card_header("Add New Task"),
+                        ui.input_text("task_subject", "Task Subject:", placeholder="Enter task subject"),
+                        ui.output_ui("task_category_select"),
+                        ui.input_select("task_status", "Status:", choices=STATUSES, selected="Idea"),
+                        ui.input_text_area("task_note", "Initial Note (Optional):", rows=3),
+                        ui.input_action_button("add_task", "Add Task", class_="btn-primary")
+                    )
+                ),
+                
+                ui.column(6,
+                    ui.card(
+                        ui.card_header("Edit Task"),
+                        ui.output_ui("edit_task_select"),
+                        ui.input_text("edit_subject", "Subject:"),
+                        ui.output_ui("edit_category_select"),
+                        ui.input_select("edit_status", "Status:", choices=STATUSES),
+                        ui.input_text_area("new_note", "Add Note:", rows=2),
+                        ui.div(
+                            ui.input_action_button("update_task", "Update Task", class_="btn-warning"),
+                            ui.input_action_button("add_note", "Add Note", class_="btn-info"),
+                            ui.input_action_button("delete_task", "Delete Task", class_="btn-danger"),
+                            style="margin-top: 10px;"
+                        )
+                    )
+                )
+            ),
+            
+            ui.hr(),
+            
             ui.card(
-                ui.card_header("Add New Task"),
-                ui.input_text("task_subject", "Task Subject:", placeholder="Enter task subject"),
-                ui.input_select("task_category", "Category:", 
-                    choices={str(k): v for k, v in CATEGORIES.items()}),
-                ui.input_select("task_status", "Status:", choices=STATUSES, selected="Idea"),
-                ui.input_text_area("task_note", "Initial Note (Optional):", rows=3),
-                ui.input_action_button("add_task", "Add Task", class_="btn-primary")
-            )
+                ui.card_header("All Tasks"),
+                ui.output_data_frame("tasks_table")
+            ),
+            
+            ui.div(id="selected_task_notes", style="margin-top: 20px;"),
+            ui.output_ui("task_notes_display")
         ),
         
-        ui.column(6,
-            ui.card(
-                ui.card_header("Edit Task"),
-                ui.input_select("edit_task_id", "Select Task to Edit:", choices={}),
-                ui.input_text("edit_subject", "Subject:"),
-                ui.input_select("edit_category", "Category:", 
-                    choices={str(k): v for k, v in CATEGORIES.items()}),
-                ui.input_select("edit_status", "Status:", choices=STATUSES),
-                ui.input_text_area("new_note", "Add Note:", rows=2),
-                ui.div(
-                    ui.input_action_button("update_task", "Update Task", class_="btn-warning"),
-                    ui.input_action_button("add_note", "Add Note", class_="btn-info"),
-                    ui.input_action_button("delete_task", "Delete Task", class_="btn-danger"),
-                    style="margin-top: 10px;"
+        ui.nav_panel("Categories",
+            ui.row(
+                ui.column(6,
+                    ui.card(
+                        ui.card_header("Add New Category"),
+                        ui.input_text("new_category_name", "Category Name:", placeholder="Enter category name"),
+                        ui.input_action_button("add_category", "Add Category", class_="btn-primary"),
+                        ui.div(id="add_category_message", style="margin-top: 10px;")
+                    )
+                ),
+                
+                ui.column(6,
+                    ui.card(
+                        ui.card_header("Edit Category"),
+                        ui.output_ui("edit_category_dropdown"),
+                        ui.input_text("edit_category_name", "Category Name:"),
+                        ui.div(
+                            ui.input_action_button("update_category", "Update Category", class_="btn-warning"),
+                            ui.input_action_button("delete_category", "Delete Category", class_="btn-danger"),
+                            style="margin-top: 10px;"
+                        ),
+                        ui.div(id="edit_category_message", style="margin-top: 10px;")
+                    )
                 )
+            ),
+            
+            ui.hr(),
+            
+            ui.card(
+                ui.card_header("All Categories"),
+                ui.output_data_frame("categories_table")
             )
         )
-    ),
-    
-    ui.hr(),
-    
-    ui.card(
-        ui.card_header("All Tasks"),
-        ui.output_data_frame("tasks_table")
-    ),
-    
-    ui.div(id="selected_task_notes", style="margin-top: 20px;"),
-    ui.output_ui("task_notes_display")
+    )
 )
 
 def server(input, output, session):
-    # Reactive value to trigger table refresh
-    refresh_trigger = reactive.Value(0)
+    # Reactive values to trigger refreshes
+    refresh_tasks = reactive.Value(0)
+    refresh_categories = reactive.Value(0)
+    category_message = reactive.Value("")
+    edit_category_message = reactive.Value("")
     
-    # Add new task
+    # Dynamic UI for category selects
+    @output
+    @render.ui
+    def task_category_select():
+        refresh_categories.get()  # Depend on category changes
+        categories = db.get_categories_dict()
+        return ui.input_select("task_category", "Category:", choices=categories)
+    
+    @output
+    @render.ui
+    def edit_category_select():
+        refresh_categories.get()  # Depend on category changes
+        categories = db.get_categories_dict()
+        return ui.input_select("edit_category", "Category:", choices=categories)
+    
+    @output
+    @render.ui
+    def edit_task_select():
+        refresh_tasks.get()  # Depend on task changes
+        tasks = db.get_all_tasks()
+        choices = {str(task['id']): f"{task['subject']} ({task['category_name']})" 
+                  for task in tasks}
+        return ui.input_select("edit_task_id", "Select Task to Edit:", choices=choices)
+    
+    @output
+    @render.ui
+    def edit_category_dropdown():
+        refresh_categories.get()  # Depend on category changes
+        categories = db.get_categories_dict()
+        return ui.input_select("selected_category_id", "Select Category to Edit:", choices=categories)
+    
+    # Category management
+    @reactive.Effect
+    @reactive.event(input.add_category)
+    def add_new_category():
+        if not input.new_category_name() or not input.new_category_name().strip():
+            return
+        
+        success = db.create_category(input.new_category_name().strip())
+        
+        if success:
+            ui.update_text("new_category_name", value="")
+            category_message.set("Category added successfully!")
+            refresh_categories.set(refresh_categories.get() + 1)
+        else:
+            category_message.set("Error adding category. It may already exist.")
+    
+    @reactive.Effect
+    @reactive.event(input.selected_category_id)
+    def update_category_form():
+        if not input.selected_category_id():
+            return
+        
+        category = db.get_category_by_id(int(input.selected_category_id()))
+        if category:
+            ui.update_text("edit_category_name", value=category['name'])
+    
+    @reactive.Effect
+    @reactive.event(input.update_category)
+    def update_existing_category():
+        if not input.selected_category_id() or not input.edit_category_name():
+            return
+        
+        success = db.update_category(int(input.selected_category_id()), input.edit_category_name())
+        
+        if success:
+            edit_category_message.set("Category updated successfully!")
+            refresh_categories.set(refresh_categories.get() + 1)
+            refresh_tasks.set(refresh_tasks.get() + 1)  # Refresh tasks to show new category names
+        else:
+            edit_category_message.set("Error updating category.")
+    
+    @reactive.Effect
+    @reactive.event(input.delete_category)
+    def delete_existing_category():
+        if not input.selected_category_id():
+            return
+        
+        success, message = db.delete_category(int(input.selected_category_id()))
+        edit_category_message.set(message)
+        
+        if success:
+            ui.update_select("selected_category_id", selected="")
+            ui.update_text("edit_category_name", value="")
+            refresh_categories.set(refresh_categories.get() + 1)
+    
+    # Task management (updated for new category system)
     @reactive.Effect
     @reactive.event(input.add_task)
     def add_new_task():
@@ -321,21 +575,10 @@ def server(input, output, session):
         )
         
         if success:
-            # Reset form
             ui.update_text("task_subject", value="")
             ui.update_text_area("task_note", value="")
-            refresh_trigger.set(refresh_trigger.get() + 1)
+            refresh_tasks.set(refresh_tasks.get() + 1)
     
-    # Update task dropdown when tasks change
-    @reactive.Effect
-    def update_task_dropdown():
-        refresh_trigger.get()  # Depend on refresh trigger
-        tasks = db.get_all_tasks()
-        choices = {str(task['id']): f"{task['subject']} ({CATEGORIES[task['category']]})" 
-                  for task in tasks}
-        ui.update_select("edit_task_id", choices=choices)
-    
-    # Update edit form when task is selected
     @reactive.Effect
     @reactive.event(input.edit_task_id)
     def update_edit_form():
@@ -345,10 +588,9 @@ def server(input, output, session):
         task = db.get_task_by_id(int(input.edit_task_id()))
         if task:
             ui.update_text("edit_subject", value=task['subject'])
-            ui.update_select("edit_category", selected=str(task['category']))
+            ui.update_select("edit_category", selected=str(task['category_id']))
             ui.update_select("edit_status", selected=task['status'])
     
-    # Update task
     @reactive.Effect
     @reactive.event(input.update_task)
     def update_existing_task():
@@ -363,9 +605,8 @@ def server(input, output, session):
         )
         
         if success:
-            refresh_trigger.set(refresh_trigger.get() + 1)
+            refresh_tasks.set(refresh_tasks.get() + 1)
     
-    # Add note to task
     @reactive.Effect
     @reactive.event(input.add_note)
     def add_task_note():
@@ -376,9 +617,8 @@ def server(input, output, session):
         
         if success:
             ui.update_text_area("new_note", value="")
-            refresh_trigger.set(refresh_trigger.get() + 1)
+            refresh_tasks.set(refresh_tasks.get() + 1)
     
-    # Delete task
     @reactive.Effect
     @reactive.event(input.delete_task)
     def delete_existing_task():
@@ -391,13 +631,13 @@ def server(input, output, session):
             ui.update_select("edit_task_id", selected="")
             ui.update_text("edit_subject", value="")
             ui.update_text_area("new_note", value="")
-            refresh_trigger.set(refresh_trigger.get() + 1)
+            refresh_tasks.set(refresh_tasks.get() + 1)
     
-    # Render tasks table
+    # Render tables
     @output
     @render.data_frame
     def tasks_table():
-        refresh_trigger.get()  # Depend on refresh trigger
+        refresh_tasks.get()
         tasks = db.get_all_tasks()
         
         if not tasks:
@@ -408,7 +648,7 @@ def server(input, output, session):
             df_data.append({
                 'ID': task['id'],
                 'Subject': task['subject'],
-                'Category': CATEGORIES[task['category']],
+                'Category': task['category_name'],
                 'Status': task['status'],
                 'Created': task['created_at'].strftime('%Y-%m-%d %H:%M') if task['created_at'] else '',
                 'Notes': task['notes'][:100] + '...' if task['notes'] and len(task['notes']) > 100 else task['notes'] or ''
@@ -416,7 +656,25 @@ def server(input, output, session):
         
         return pd.DataFrame(df_data)
     
-    # Display notes for selected task
+    @output
+    @render.data_frame
+    def categories_table():
+        refresh_categories.get()
+        categories = db.get_all_categories()
+        
+        if not categories:
+            return pd.DataFrame(columns=['ID', 'Name', 'Created'])
+        
+        df_data = []
+        for category in categories:
+            df_data.append({
+                'ID': category['id'],
+                'Name': category['name'],
+                'Created': category['created_at'].strftime('%Y-%m-%d %H:%M') if category['created_at'] else ''
+            })
+        
+        return pd.DataFrame(df_data)
+    
     @output
     @render.ui
     def task_notes_display():
